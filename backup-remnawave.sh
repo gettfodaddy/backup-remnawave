@@ -34,6 +34,8 @@ declare -a ITEM_NAMES=() ITEM_STATUS=() ITEM_BYTES=() ITEM_FILES=()
 ERRORS=0
 WARNINGS=0
 PUBLISHED_ARCHIVE=""
+DB_VERSION_REMNAWAVE="unknown"
+DB_VERSION_BOT="unknown"
 
 log() { printf '[%s UTC] %s\n' "$(date -u '+%H:%M:%S')" "$*"; }
 die() { log "FATAL: $*" >&2; exit 1; }
@@ -131,6 +133,10 @@ backup_database() {
         record "$label" ERROR 0 "$output"
         return 1
     fi
+    case "$container" in
+        "$CONTAINER_REMNAWAVE_DB") DB_VERSION_REMNAWAVE="${version%% *}" ;;
+        "$CONTAINER_BOT_DB") DB_VERSION_BOT="${version%% *}" ;;
+    esac
     if docker exec "$container" pg_dumpall -U "$user" 2>"$STAGE/${output}.stderr" | gzip -c > "$STAGE/$output"; then
         if gzip -t "$STAGE/$output" && [[ -s "$STAGE/$output" ]]; then
             printf '%s\n' "$version" > "$STAGE/${output%.gz}.server-version.txt"
@@ -285,44 +291,69 @@ END_EPOCH="$(date +%s)"
 DURATION=$((END_EPOCH - START_EPOCH))
 ARCHIVE_SIZE="$(du -h "$FINAL_ARCHIVE" | awk '{print $1}')"
 if (( WARNINGS == 0 )); then
-    STATUS_ICON='✅'
-    STATUS_TEXT='РЕЗЕРВНАЯ КОПИЯ СОЗДАНА'
+    STATUS_TEXT='УСПЕШНО'
 else
-    STATUS_ICON='⚠️'
-    STATUS_TEXT='СОЗДАНО С ПРОПУСКАМИ'
+    STATUS_TEXT="С ПРОПУСКАМИ: $WARNINGS"
 fi
+DISPLAY_TIME="$(TZ=Europe/Moscow date '+%d.%m.%Y %H:%M MSK')"
 REPORT_LINES=(
-    'РЕЗЕРВНАЯ КОПИЯ'
-    "$STATUS_ICON $STATUS_TEXT"
-    ''
-    'СЕРВЕР' "$HOST"
-    'ОПЕРАЦИОННАЯ СИСТЕМА' "$OS"
-    'ВРЕМЯ UTC' "$RUN_ID"
-    'ДЛИТЕЛЬНОСТЬ' "$((DURATION / 60)) мин $((DURATION % 60)) сек"
-    'РАЗМЕР АРХИВА' "$ARCHIVE_SIZE"
-    ''
-    'СОСТАВ БЭКАПА'
+    "@CENTER@BACKUP · $STATUS_TEXT"
+    '@DIVIDER@'
+    "  Сервер       $HOST"
+    "  ОС           $OS"
+    "  Дата         $DISPLAY_TIME"
+    "  Время UTC    $RUN_ID"
+    "  Длительность $((DURATION / 60)) мин $((DURATION % 60)) сек"
+    "  Размер       $ARCHIVE_SIZE"
+    "  PostgreSQL   panel $DB_VERSION_REMNAWAVE / bot $DB_VERSION_BOT"
+    '@DIVIDER@'
+    '@CENTER@БАЗЫ ДАННЫХ'
 )
 for i in "${!ITEM_NAMES[@]}"; do
+    if (( i == 3 )); then
+        REPORT_LINES+=('@DIVIDER@' '@CENTER@КОНФИГУРАЦИЯ И ФАЙЛЫ')
+    fi
     case "${ITEM_STATUS[$i]}" in
-        OK) item_icon='✅';;
-        SKIP) item_icon='➖';;
-        *) item_icon='❌';;
+        OK) item_status='OK';;
+        SKIP) item_status='--';;
+        *) item_status='!!';;
     esac
-    REPORT_LINES+=("$item_icon ${ITEM_NAMES[$i]}" "${ITEM_BYTES[$i]} байт")
+    case "${ITEM_NAMES[$i]}" in
+        'PostgreSQL Remnawave'*) display_name='PostgreSQL Remnawave' ;;
+        'PostgreSQL Bedolaga Bot'*) display_name='PostgreSQL Bot' ;;
+        'Redis Bot'*) display_name='Redis Bot' ;;
+        'Remnawave config') display_name='Remnawave' ;;
+        'Bedolaga Bot config and data') display_name='Bedolaga Bot' ;;
+        'Cabinet config') display_name='Cabinet' ;;
+        'Uptime Kuma project files') display_name='Uptime Kuma' ;;
+        'Monitoring') display_name='Monitoring' ;;
+        'Nginx configuration') display_name='Nginx' ;;
+        'Let’s Encrypt certificates and keys') display_name='SSL certificates' ;;
+        'Fail2ban configuration') display_name='Fail2ban' ;;
+        'Local administration scripts') display_name='Scripts' ;;
+        *) display_name="${ITEM_NAMES[$i]}" ;;
+    esac
+    if [[ "${ITEM_STATUS[$i]}" == OK ]]; then
+        size_text="$(numfmt --to=iec "${ITEM_BYTES[$i]}")"
+    else
+        size_text='skip'
+    fi
+    printf -v report_row '  [%-2s] %-26s %8s' "$item_status" "$display_name" "$size_text"
+    REPORT_LINES+=("$report_row")
 done
+archive_hash="$(cut -d' ' -f1 "${FINAL_ARCHIVE}.sha256")"
 REPORT_LINES+=(
-    ''
-    'ИМЯ АРХИВА' "$(basename "$FINAL_ARCHIVE")"
-    'SHA-256'
-    "$(cut -d' ' -f1 "${FINAL_ARCHIVE}.sha256")"
+    '@DIVIDER@'
+    "  Архив        $(basename "$FINAL_ARCHIVE")"
+    "  SHA-256      ${archive_hash:0:32}"
+    "               ${archive_hash:32}"
 )
 REPORT="$(python3 - "${REPORT_LINES[@]}" <<'PY'
 import html
 import sys
 import unicodedata
 
-WIDTH = 38
+WIDTH = 46
 
 def char_width(ch):
     if unicodedata.combining(ch) or ch in ('\u200d', '\ufe0f'):
@@ -355,13 +386,22 @@ def wrap(value):
 
 top = '┌' + '─' * (WIDTH + 2) + '┐'
 bottom = '└' + '─' * (WIDTH + 2) + '┘'
+lines = []
+for original in sys.argv[1:]:
+    if original == '@DIVIDER@':
+        lines.append('├' + '─' * (WIDTH + 2) + '┤')
+    elif original.startswith('@CENTER@'):
+        for line in wrap(original[len('@CENTER@'):]):
+            left = max(0, (WIDTH - text_width(line)) // 2)
+            right = max(0, WIDTH - text_width(line) - left)
+            lines.append('│ ' + ' ' * left + line + ' ' * right + ' │')
+    else:
+        for line in wrap(original):
+            lines.append('│ ' + line.ljust(WIDTH) + ' │')
 print('<pre>')
 print(top)
-for original in sys.argv[1:]:
-    for line in wrap(original):
-        left = max(0, (WIDTH - text_width(line)) // 2)
-        right = max(0, WIDTH - text_width(line) - left)
-        print('│ ' + ' ' * left + html.escape(line, quote=False) + ' ' * right + ' │')
+for line in lines:
+    print(html.escape(line, quote=False))
 print(bottom)
 print('</pre>')
 PY
