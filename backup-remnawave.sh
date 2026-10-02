@@ -40,12 +40,17 @@ die() { log "FATAL: $*" >&2; exit 1; }
 
 banner() {
     local label='backup.sh'
+    local inner=40 pad right content
+    pad=$(( (inner - ${#label}) / 2 ))
+    right=$(( inner - ${#label} - pad ))
+    printf -v content '%*s%s%*s' "$pad" '' "$label" "$right" ''
     if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-        printf '\033[38;5;43m  ╔══════════════════════════════════════╗\033[0m\n'
-        printf '\033[38;5;43m  ║             %-20s ║\033[0m\n' "$label"
-        printf '\033[38;5;43m  ╚══════════════════════════════════════╝\033[0m\n\n'
+        printf '\033[38;5;45m  +----------------------------------------+\033[0m\n'
+        printf '\033[38;5;45m  |%s|\033[0m\033[38;5;240m\\\033[0m\n' "$content"
+        printf '\033[38;5;45m  +----------------------------------------+\033[0m\033[38;5;240m \\\033[0m\n'
+        printf '\033[38;5;240m   \\________________________________________\\\033[0m\n\n'
     else
-        printf '  +--------------------------------------+\n  |             %-20s |\n  +--------------------------------------+\n\n' "$label"
+        printf '  +----------------------------------------+\n  |%s|\\\n  +----------------------------------------+ \\\n   \\________________________________________\\\n\n' "$content"
     fi
 }
 banner
@@ -279,38 +284,88 @@ find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'backup_*.tar.gz' -o -name 'back
 END_EPOCH="$(date +%s)"
 DURATION=$((END_EPOCH - START_EPOCH))
 ARCHIVE_SIZE="$(du -h "$FINAL_ARCHIVE" | awk '{print $1}')"
-STATUS_TEXT='Успешно'
-(( WARNINGS == 0 )) || STATUS_TEXT="Готово с пропусками: $WARNINGS"
-html_escape() {
-    python3 -c 'import html,sys; print(html.escape(sys.argv[1], quote=False), end="")' "$1"
-}
-
 if (( WARNINGS == 0 )); then
     STATUS_ICON='✅'
+    STATUS_TEXT='РЕЗЕРВНАЯ КОПИЯ СОЗДАНА'
 else
     STATUS_ICON='⚠️'
+    STATUS_TEXT='СОЗДАНО С ПРОПУСКАМИ'
 fi
-REPORT="<b>🛡 TUNNER · BACKUP</b>
-<b>Статус:</b> ${STATUS_ICON} $(html_escape "$STATUS_TEXT")
-<b>Сервер:</b> <code>$(html_escape "$HOST")</code>
-<b>ОС:</b> $(html_escape "$OS")
-<b>Время (UTC):</b> <code>$RUN_ID</code>
-<b>Длительность:</b> $((DURATION / 60)) мин $((DURATION % 60)) сек
-<b>Размер:</b> $ARCHIVE_SIZE
-
-<b>СОСТАВ БЭКАПА</b>"
+REPORT_LINES=(
+    'РЕЗЕРВНАЯ КОПИЯ'
+    "$STATUS_ICON $STATUS_TEXT"
+    ''
+    'СЕРВЕР' "$HOST"
+    'ОПЕРАЦИОННАЯ СИСТЕМА' "$OS"
+    'ВРЕМЯ UTC' "$RUN_ID"
+    'ДЛИТЕЛЬНОСТЬ' "$((DURATION / 60)) мин $((DURATION % 60)) сек"
+    'РАЗМЕР АРХИВА' "$ARCHIVE_SIZE"
+    ''
+    'СОСТАВ БЭКАПА'
+)
 for i in "${!ITEM_NAMES[@]}"; do
     case "${ITEM_STATUS[$i]}" in
         OK) item_icon='✅';;
         SKIP) item_icon='➖';;
         *) item_icon='❌';;
     esac
-    REPORT+="
-$item_icon $(html_escape "${ITEM_NAMES[$i]}") · ${ITEM_BYTES[$i]} байт"
+    REPORT_LINES+=("$item_icon ${ITEM_NAMES[$i]}" "${ITEM_BYTES[$i]} байт")
 done
-REPORT+="
-<b>Архив:</b> <code>$(html_escape "$(basename "$FINAL_ARCHIVE")")</code>
-<b>SHA-256:</b> <code>$(cut -d' ' -f1 "${FINAL_ARCHIVE}.sha256")</code>"
+REPORT_LINES+=(
+    ''
+    'ИМЯ АРХИВА' "$(basename "$FINAL_ARCHIVE")"
+    'SHA-256'
+    "$(cut -d' ' -f1 "${FINAL_ARCHIVE}.sha256")"
+)
+REPORT="$(python3 - "${REPORT_LINES[@]}" <<'PY'
+import html
+import sys
+import unicodedata
+
+WIDTH = 38
+
+def char_width(ch):
+    if unicodedata.combining(ch) or ch in ('\u200d', '\ufe0f'):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ('W', 'F') or ord(ch) >= 0x1F000 else 1
+
+def text_width(value):
+    return sum(char_width(ch) for ch in value)
+
+def wrap(value):
+    if not value:
+        return ['']
+    result, line = [], ''
+    for word in value.split():
+        candidate = word if not line else line + ' ' + word
+        if text_width(candidate) <= WIDTH:
+            line = candidate
+            continue
+        if line:
+            result.append(line)
+            line = ''
+        for ch in word:
+            if line and text_width(line + ch) > WIDTH:
+                result.append(line)
+                line = ''
+            line += ch
+    if line:
+        result.append(line)
+    return result
+
+top = '┌' + '─' * (WIDTH + 2) + '┐'
+bottom = '└' + '─' * (WIDTH + 2) + '┘'
+print('<pre>')
+print(top)
+for original in sys.argv[1:]:
+    for line in wrap(original):
+        left = max(0, (WIDTH - text_width(line)) // 2)
+        right = max(0, WIDTH - text_width(line) - left)
+        print('│ ' + ' ' * left + html.escape(line, quote=False) + ' ' * right + ' │')
+print(bottom)
+print('</pre>')
+PY
+)"
 
 log "Готово: $FINAL_ARCHIVE ($ARCHIVE_SIZE); $STATUS_TEXT"
 
