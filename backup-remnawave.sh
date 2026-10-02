@@ -395,6 +395,9 @@ for original in sys.argv[1:]:
             left = max(0, (WIDTH - text_width(line)) // 2)
             right = max(0, WIDTH - text_width(line) - left)
             lines.append('│ ' + ' ' * left + line + ' ' * right + ' │')
+    elif original.startswith('  [') and text_width(original) <= WIDTH:
+        # Preserve the deliberate padding between the component label and size column.
+        lines.append('│ ' + original + ' ' * (WIDTH - text_width(original)) + ' │')
     else:
         for line in wrap(original):
             lines.append('│ ' + line.ljust(WIDTH) + ' │')
